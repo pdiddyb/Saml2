@@ -22,7 +22,8 @@ using System.Xml.Linq;
 
 namespace Sustainsys.Saml2.Owin.Tests
 {
-	using Microsoft.Owin.Security.DataProtection;
+    using Microsoft.Owin.Infrastructure;
+    using Microsoft.Owin.Security.DataProtection;
 	using NSubstitute;
 	using Saml2.Exceptions;
 	using Sustainsys.Saml2.TestHelpers;
@@ -417,6 +418,44 @@ namespace Sustainsys.Saml2.Owin.Tests
         }
 
         [TestMethod]
+        public async Task Saml2AuthenticationMiddleware_OnlyExecutesLogoutCommandOnce()
+        {
+            // A test case for a bug. If logout command is called through the /Saml2/Logout endpoint,
+            // it will cause a logout of the local session. Which caused the automatic processing
+            // of logout to run the logout command again.
+
+            Saml2AuthenticationOptions options = new Saml2AuthenticationOptions(true)
+            {
+                AuthenticationMode = AuthenticationMode.Passive
+            };
+
+            var subject = new Saml2AuthenticationMiddleware(
+                new StubOwinMiddleware(200, revoke: new AuthenticationResponseRevoke(
+                    new string[0])),
+                CreateAppBuilder(),
+                options);
+
+            var context = OwinTestHelpers.CreateOwinContext();
+
+            context.Request.Path = new PathString("/Saml2/Logout");
+            context.Request.User = new ClaimsPrincipal(
+                new ClaimsIdentity(new Claim[]
+                {
+                    new Claim(Saml2ClaimTypes.LogoutNameIdentifier, ",,,,NameId", null, "https://idp.example.com"),
+                    new Claim(Saml2ClaimTypes.SessionIndex, "SessionId", null, "https://idp.example.com")
+                }, "Federation"));
+
+            var logoutCommandCalled = false;
+            options.Notifications.LogoutCommandResultCreated = cr =>
+            {
+                logoutCommandCalled.Should().BeFalse();
+                logoutCommandCalled = true;
+            };
+
+            await subject.Invoke(context);
+        }
+
+        [TestMethod]
         public async Task Saml2AuthenticationMiddleware_HandlesLogoutResponse()
         {
             var app = CreateAppBuilder();
@@ -659,6 +698,34 @@ namespace Sustainsys.Saml2.Owin.Tests
             var storedState = ExtractRequestState(options.DataProtector, context);
 
             storedState.ReturnUrl.Should().Be(returnUrl);
+        }
+
+        [TestMethod]
+        public async Task Saml2AuthenticationMiddleware_UseConfiguredCookieManager()
+        {
+            var returnUrl = "http://sp.example.com/returnurl";
+
+            var options = new Saml2AuthenticationOptions(true);
+            var mockCookieManager = Substitute.For<ICookieManager>();
+            options.CookieManager = mockCookieManager;
+
+            var subject = new Saml2AuthenticationMiddleware(
+                new StubOwinMiddleware(401, new AuthenticationResponseChallenge(
+                    new string[] { "Saml2" }, new AuthenticationProperties()
+                    {
+                        RedirectUri = returnUrl
+                    } ) ),
+                    CreateAppBuilder(), options);
+
+            var context = OwinTestHelpers.CreateOwinContext();
+
+            await subject.Invoke(context);
+
+            mockCookieManager.Received().AppendResponseCookie(
+                context,
+                Arg.Is<string>(value => value.StartsWith("Saml2.")),
+                Arg.Is<string>(value => true),
+                Arg.Is<CookieOptions>(c => c.HttpOnly && c.Path == "/" ));
         }
 
         [TestMethod]

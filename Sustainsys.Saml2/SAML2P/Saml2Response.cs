@@ -72,10 +72,12 @@ namespace Sustainsys.Saml2.Saml2P
         /// <param name="xml">Root xml element.</param>
         /// <param name="expectedInResponseTo">The expected value of the
         /// InReplyTo parameter in the message.</param>
-        [ExcludeFromCodeCoverage] // Just a wrapper o keep backward compatibility
-        public Saml2Response(XmlElement xml, Saml2Id expectedInResponseTo): this(xml, expectedInResponseTo, null)
-        {
-        }
+        /// <param name="options">Service provider settings used when validating Saml response</param>
+#pragma warning disable IDE0060 // Remove unused parameter
+        public Saml2Response(XmlElement xml, Saml2Id expectedInResponseTo, IOptions options)
+            : this(xml, expectedInResponseTo)
+#pragma warning restore IDE0060 // Remove unused parameter
+        { }
 
         /// <summary>
         /// Ctor
@@ -83,8 +85,7 @@ namespace Sustainsys.Saml2.Saml2P
         /// <param name="xml">Root xml element.</param>
         /// <param name="expectedInResponseTo">The expected value of the
         /// InReplyTo parameter in the message.</param>
-        /// <param name="options">Service provider settings used when validating Saml response</param>
-        public Saml2Response(XmlElement xml, Saml2Id expectedInResponseTo, IOptions options)
+        public Saml2Response(XmlElement xml, Saml2Id expectedInResponseTo)
         {
             if (xml == null)
             {
@@ -106,7 +107,8 @@ namespace Sustainsys.Saml2.Saml2P
 
             id = new Saml2Id(xml.GetRequiredAttributeValue("ID"));
 
-            ReadAndValidateInResponseTo(xml, expectedInResponseTo, options);
+            ExpectedInResponseTo = expectedInResponseTo;
+            ReadInResponseTo(xml);
 
             issueInstant = DateTime.Parse(xml.GetRequiredAttributeValue("IssueInstant"),
                 CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal);
@@ -130,8 +132,7 @@ namespace Sustainsys.Saml2.Saml2P
 
             if (destinationUrlString != null)
             {
-                Uri parsedDestination;
-                if (!Uri.TryCreate(destinationUrlString, UriKind.Absolute, out parsedDestination))
+                if (!Uri.TryCreate(destinationUrlString, UriKind.Absolute, out Uri parsedDestination))
                 {
                     throw new BadFormatSamlResponseException("Destination value was not a valid Uri");
                 }
@@ -139,30 +140,50 @@ namespace Sustainsys.Saml2.Saml2P
             }
         }
 
+        private void ReadInResponseTo(XmlElement xml)
+        {
+            var parsedInResponseTo = xml.Attributes["InResponseTo"].GetValueIfNotNull();
+
+            if(parsedInResponseTo != null)
+            {
+                InResponseTo = new Saml2Id(parsedInResponseTo);
+            }
+        }
+
         [SuppressMessage("Microsoft.Naming", "CA2204:Literals should be spelled correctly", MessageId = "IgnoreMissingInResponseTo")]
         [SuppressMessage("Microsoft.Naming", "CA2204:Literals should be spelled correctly", MessageId = "InResponseTo")]
         [SuppressMessage("Microsoft.Naming", "CA2204:Literals should be spelled correctly", MessageId = "RelayState")]
-        private void ReadAndValidateInResponseTo(XmlElement xml, Saml2Id expectedInResponseTo, IOptions options)
+        private void ValidateInResponseTo(IOptions options, IEnumerable<ClaimsIdentity> claimsIdentities)
         {
-            var parsedInResponseTo = xml.Attributes["InResponseTo"].GetValueIfNotNull();
-            if (parsedInResponseTo != null)
-            {
-                InResponseTo = new Saml2Id(parsedInResponseTo);
-                if (expectedInResponseTo == null)
+            if(InResponseTo != null)
+            { 
+                if (ExpectedInResponseTo == null)
                 {
-                    throw new UnexpectedInResponseToException(
-                        string.Format(CultureInfo.InvariantCulture,
-                        "Received message contains unexpected InResponseTo \"{0}\". No cookie preserving state " +
-                        "from the request was found so the message was not expected to have an InResponseTo attribute. " +
-                        "This error typically occurs if the cookie set when doing SP-initiated sign on have been lost.",
-                        InResponseTo.Value));
+                    if (options.Notifications.Unsafe.IgnoreUnexpectedInResponseTo(this, claimsIdentities))
+                    {
+                        options.SPOptions.Logger.WriteInformation($"Ignoring unexpected InReponseTo {InResponseTo.Value}"
+                            + $"for Saml2 response {Id.Value} for user "
+                            + claimsIdentities.First().FindFirst(ClaimTypes.NameIdentifier)?.Value + ".");
+                    }
+                    else
+                    {
+                        throw new UnexpectedInResponseToException(
+                            $"Received message {id.Value} contains unexpected InResponseTo \"{InResponseTo.Value}\". No " +
+                            $"cookie preserving state from the request was found so the message was not expected to have an " +
+                            $"InResponseTo attribute. This error typically occurs if the cookie set when doing SP-initiated " +
+                            $"sign on have been lost.");
+                    }
+
                 }
-                if (expectedInResponseTo.Value != InResponseTo.Value)
+                else
                 {
-                    throw new Saml2ResponseFailedValidationException(
-                        string.Format(CultureInfo.InvariantCulture,
-                        "InResponseTo Id \"{0}\" in received response does not match Id \"{1}\" of the sent request.",
-                        InResponseTo.Value, expectedInResponseTo.Value));
+                    if (ExpectedInResponseTo.Value != InResponseTo.Value)
+                    {
+                        throw new Saml2ResponseFailedValidationException(
+                            string.Format(CultureInfo.InvariantCulture,
+                            "InResponseTo Id \"{0}\" in received response does not match Id \"{1}\" of the sent request.",
+                            InResponseTo.Value, ExpectedInResponseTo.Value));
+                    }
                 }
             }
             else
@@ -172,14 +193,14 @@ namespace Sustainsys.Saml2.Saml2P
                     return;
                 };
 
-                if (expectedInResponseTo != null)
+                if (ExpectedInResponseTo != null)
                 {
                     throw new Saml2ResponseFailedValidationException(
                         string.Format(CultureInfo.InvariantCulture,
                         "Expected message to contain InResponseTo \"{0}\", but found none. If this error occurs " +
                         "due to the Idp not setting InResponseTo according to the SAML2 specification, this check " +
                         "can be disabled by setting the IgnoreMissingInResponseTo compatibility flag to true.",
-                        expectedInResponseTo.Value));
+                        ExpectedInResponseTo.Value));
                 }
             }
         }
@@ -359,6 +380,11 @@ namespace Sustainsys.Saml2.Saml2P
         public Saml2Id Id { get { return id; } }
 
         /// <summary>
+        /// Expected InResponseTo as extracted from 
+        /// </summary>
+        public Saml2Id ExpectedInResponseTo { get; private set; }
+
+        /// <summary>
         /// InResponseTo id.
         /// </summary>
         public Saml2Id InResponseTo { get; private set; }
@@ -405,10 +431,10 @@ namespace Sustainsys.Saml2.Saml2P
         /// <value>All assertion element nodes.</value>
         private IEnumerable<XmlElement> GetAllAssertionElementNodes(IOptions options)
         {
-            return allAssertionElementNodes ?? (allAssertionElementNodes = retrieveAssertionElements(options));
+            return allAssertionElementNodes ?? (allAssertionElementNodes = RetrieveAssertionElements(options));
         }
 
-        private IEnumerable<XmlElement> retrieveAssertionElements(IOptions options)
+        private IEnumerable<XmlElement> RetrieveAssertionElements(IOptions options)
         {
             var assertions = new List<XmlElement>();
 
@@ -502,7 +528,7 @@ namespace Sustainsys.Saml2.Saml2P
             options.SPOptions.Logger.WriteVerbose("Signature validation passed for Saml Response " + Id);
         }
 
-        private Uri audience;
+        private readonly Uri audience;
 
         private IEnumerable<ClaimsIdentity> claimsIdentities;
         private Exception createClaimsException;
@@ -541,6 +567,9 @@ namespace Sustainsys.Saml2.Saml2P
                 {
                     var idp = options.Notifications.GetIdentityProvider(Issuer, relayData, options);
                     claimsIdentities = CreateClaims(options, idp).ToList();
+
+                    // Validate InResponseTo now, to be able to include generated claims in notification.
+                    ValidateInResponseTo(options, claimsIdentities);
                 }
                 catch (Exception ex)
                 {
@@ -575,9 +604,8 @@ namespace Sustainsys.Saml2.Saml2P
 
 			foreach (XmlElement assertionNode in GetAllAssertionElementNodes(options))
             {
-				SecurityToken baseToken;
-                var principal = handler.ValidateToken(assertionNode.OuterXml, validationParameters, out baseToken);
-				var token = (Saml2SecurityToken)baseToken;
+                var principal = handler.ValidateToken(assertionNode.OuterXml, validationParameters, out SecurityToken baseToken);
+                var token = (Saml2SecurityToken)baseToken;
                 options.SPOptions.Logger.WriteVerbose("Extracted SAML assertion " + token.Id);
 
 				sessionNotOnOrAfter = DateTimeHelper.EarliestTime(sessionNotOnOrAfter,
